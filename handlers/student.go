@@ -32,7 +32,7 @@ func HandleStudentConnect(client *models.Client, msg models.Message, hub *server
 	client.Email = email
 	client.ClientType = "student"
 
-	hub.Register <- client
+	hub.Register(client)
 }
 
 func HandleTabUpdate(client *models.Client, msg models.Message, hub *server.Hub, logger *utils.Logger) {
@@ -60,10 +60,10 @@ func HandleTabUpdate(client *models.Client, msg models.Message, hub *server.Hub,
 		}
 
 		if data, err := json.Marshal(relayMsg); err == nil {
-			hub.Broadcast <- &models.BroadcastMessage{
+			hub.Broadcast(&models.BroadcastMessage{
 				Target:  "teacher",
 				Message: data,
-			}
+			})
 		}
 	}
 }
@@ -114,10 +114,10 @@ func HandleScreenshot(client *models.Client, msg models.Message, hub *server.Hub
 		}
 
 		if data, err := json.Marshal(relayMsg); err == nil {
-			hub.Broadcast <- &models.BroadcastMessage{
+			hub.Broadcast(&models.BroadcastMessage{
 				Target:  "teacher",
 				Message: data,
-			}
+			})
 		}
 	}
 }
@@ -140,10 +140,10 @@ func HandleScreenshotError(client *models.Client, msg models.Message, hub *serve
 		}
 
 		if data, err := json.Marshal(relayMsg); err == nil {
-			hub.Broadcast <- &models.BroadcastMessage{
+			hub.Broadcast(&models.BroadcastMessage{
 				Target:  "teacher",
 				Message: data,
-			}
+			})
 		}
 	}
 }
