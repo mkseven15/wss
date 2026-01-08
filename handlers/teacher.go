@@ -13,7 +13,7 @@ func HandleTeacherConnect(client *models.Client, msg models.Message, hub *server
 	client.ClientID = "teacher"
 	client.Email = "Teacher Dashboard"
 
-	hub.Register <- client
+	hub.Register(client)
 }
 
 func HandleTeacherCommand(client *models.Client, msg models.Message, hub *server.Hub, logger *utils.Logger) {
@@ -67,9 +67,9 @@ func HandleTeacherCommand(client *models.Client, msg models.Message, hub *server
 	}
 
 	if data, err := json.Marshal(commandMsg); err == nil {
-		hub.Broadcast <- &models.BroadcastMessage{
+		hub.Broadcast(&models.BroadcastMessage{
 			Target:  targetClientID,
 			Message: data,
-		}
+		})
 	}
 }
