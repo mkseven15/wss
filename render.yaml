@@ -2,8 +2,10 @@ services:
   - type: web
     name: saber-websocket
     env: go
-    buildCommand: go build -o server .
-    startCommand: ./app
+    region: oregon
+    plan: free
+    buildCommand: go build -o bin/server .
+    startCommand: ./bin/server
     healthCheckPath: /health
     envVars:
       - key: PORT
