@@ -218,3 +218,18 @@ func (h *Hub) GetTeacher() *models.Client {
 	defer h.mu.RUnlock()
 	return h.teacher
 }
+
+// Register adds a client to the hub
+func (h *Hub) Register(client *models.Client) {
+	h.register <- client
+}
+
+// Unregister removes a client from the hub
+func (h *Hub) Unregister(client *models.Client) {
+	h.unregister <- client
+}
+
+// Broadcast sends a message to clients
+func (h *Hub) Broadcast(message *models.BroadcastMessage) {
+	h.broadcast <- message
+}
