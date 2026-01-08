@@ -42,7 +42,7 @@ func ServeWs(hub *server.Hub, w http.ResponseWriter, r *http.Request, cfg *confi
 
 func readPump(client *models.Client, hub *server.Hub, cfg *config.Config, logger *utils.Logger) {
 	defer func() {
-		hub.Unregister <- client
+		hub.Unregister(client)
 		client.Conn.Close()
 	}()
 
