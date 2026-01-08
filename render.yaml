@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: saber-websocket
+    env: go
+    buildCommand: go build -o server .
+    startCommand: ./server
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        sync: false
+      - key: MAX_STUDENTS
+        value: 50
+      - key: SCREENSHOT_QUALITY
+        value: 60
