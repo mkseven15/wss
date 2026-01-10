@@ -74,52 +74,61 @@ func HandleScreenshot(client *models.Client, msg models.Message, hub *server.Hub
 		return
 	}
 
-	startTime := time.Now()
-
-	// Extract screenshot data
+	// 1. OPTIMIZATION: Extract data immediately to free up the reader
 	imageData, ok := msg.Data["imageData"].(string)
 	if !ok {
 		logger.Warn("Screenshot missing imageData")
 		return
 	}
+	tabID := msg.Data["tabId"]
+	clientID := client.ClientID
 
-	// Compress screenshot
-	compressedData, err := utils.CompressScreenshot(imageData, cfg.ScreenshotQuality)
-	if err != nil {
-		logger.Warn(fmt.Sprintf("Screenshot compression failed: %v", err))
-		compressedData = imageData // Use original if compression fails
-	}
+	// 2. OPTIMIZATION: Run compression asynchronously!
+	// This prevents the read pump from blocking, so we don't get network backpressure.
+	go func() {
+		startTime := time.Now()
 
-	// Log compression stats
-	originalSize := len(imageData)
-	compressedSize := len(compressedData)
-	compressionRatio := float64(originalSize-compressedSize) / float64(originalSize) * 100
-	processingTime := time.Since(startTime).Milliseconds()
+		// Compress screenshot
+		compressedData, err := utils.CompressScreenshot(imageData, cfg.ScreenshotQuality)
+		if err != nil {
+			logger.Warn(fmt.Sprintf("Screenshot compression failed: %v", err))
+			compressedData = imageData // Use original if compression fails
+		}
 
-	logger.Info(fmt.Sprintf("Screenshot from %s: %d -> %d bytes (%.1f%% reduction) in %dms",
-		client.ClientID, originalSize, compressedSize, compressionRatio, processingTime))
+		// Log compression stats (Optional: comment out in production to save I/O)
+		// originalSize := len(imageData)
+		// compressedSize := len(compressedData)
+		// processingTime := time.Since(startTime).Milliseconds()
+		// logger.Info(fmt.Sprintf("Screenshot processed for %s in %dms", clientID, processingTime))
 
-	// Relay to teacher with compressed data
-	teacher := hub.GetTeacher()
-	if teacher != nil {
-		relayMsg := map[string]interface{}{
-			"type": "student_screenshot",
-			"data": map[string]interface{}{
-				"clientId": client.ClientID,
-				"payload": map[string]interface{}{
-					"tabId":     msg.Data["tabId"],
-					"imageData": compressedData,
+		// Check if too much time passed (stale frame)
+		if time.Since(startTime) > 2000*time.Millisecond {
+			logger.Warn("Dropping stale screenshot (>2s old)")
+			return
+		}
+
+		// Relay to teacher with compressed data
+		teacher := hub.GetTeacher()
+		if teacher != nil {
+			relayMsg := map[string]interface{}{
+				"type": "student_screenshot",
+				"data": map[string]interface{}{
+					"clientId": clientID,
+					"payload": map[string]interface{}{
+						"tabId":     tabID,
+						"imageData": compressedData,
+					},
 				},
-			},
-		}
+			}
 
-		if data, err := json.Marshal(relayMsg); err == nil {
-			hub.Broadcast(&models.BroadcastMessage{
-				Target:  "teacher",
-				Message: data,
-			})
+			if data, err := json.Marshal(relayMsg); err == nil {
+				hub.Broadcast(&models.BroadcastMessage{
+					Target:  "teacher",
+					Message: data,
+				})
+			}
 		}
-	}
+	}()
 }
 
 func HandleScreenshotError(client *models.Client, msg models.Message, hub *server.Hub, logger *utils.Logger) {
@@ -160,7 +169,7 @@ func HandlePing(client *models.Client, msg models.Message, hub *server.Hub, logg
 		select {
 		case client.Send <- data:
 		default:
-			logger.Warn("Client send channel full, dropping pong")
+			// Optimization: Don't log on every dropped ping, it spams logs
 		}
 	}
 }
