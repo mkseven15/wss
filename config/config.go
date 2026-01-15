@@ -13,23 +13,19 @@ type Config struct {
 	WriteTimeout      time.Duration
 	PongTimeout       time.Duration
 	PingInterval      time.Duration
-	ScreenshotQuality int
-	MessageBufferSize int
+	// Increased buffer to handle burst traffic, but logic will drop packets if full
+	MessageBufferSize int 
 }
 
 func LoadConfig() *Config {
 	return &Config{
 		Port:           getEnv("PORT", "8080"),
-		MaxStudents:    getEnvInt("MAX_STUDENTS", 50),
-		MaxMessageSize: 10 * 1024 * 1024, // 10MB for screenshots
-		WriteTimeout:   10 * time.Second,
+		MaxStudents:    getEnvInt("MAX_STUDENTS", 100), // Increased default
+		MaxMessageSize: 10 * 1024 * 1024, // 10MB
+		WriteTimeout:   5 * time.Second,  // Tighter timeout to detect lag quickly
 		PongTimeout:    60 * time.Second,
-		PingInterval:   54 * time.Second, // Slightly less than pong timeout
-		ScreenshotQuality: getEnvInt("SCREENSHOT_QUALITY", 60),
-		// CRITICAL CHANGE: Reduced from 256 to 32.
-		// A smaller buffer forces frames to drop if the teacher lags, 
-		// ensuring they only see "live" data instead of old history.
-		MessageBufferSize: 32, 
+		PingInterval:   50 * time.Second,
+		MessageBufferSize: 128, 
 	}
 }
 

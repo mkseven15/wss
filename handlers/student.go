@@ -2,26 +2,18 @@ package handlers
 
 import (
 	"encoding/json"
-	"fmt"
 	"saber-websocket/config"
 	"saber-websocket/models"
 	"saber-websocket/server"
 	"saber-websocket/utils"
-	"time"
 )
 
 func HandleStudentConnect(client *models.Client, msg models.Message, hub *server.Hub, logger *utils.Logger) {
 	data, ok := msg.Data["clientId"]
-	if !ok {
-		logger.Warn("student_connect missing clientId")
-		return
-	}
-
+	if !ok { return }
+	
 	clientID, ok := data.(string)
-	if !ok {
-		logger.Warn("student_connect clientId is not a string")
-		return
-	}
+	if !ok { return }
 
 	email := "N/A"
 	if emailData, ok := msg.Data["email"].(string); ok {
@@ -36,140 +28,63 @@ func HandleStudentConnect(client *models.Client, msg models.Message, hub *server
 }
 
 func HandleTabUpdate(client *models.Client, msg models.Message, hub *server.Hub, logger *utils.Logger) {
-	if client.ClientType != "student" {
-		logger.Warn("Non-student sent tab update")
-		return
-	}
+	if client.ClientType != "student" { return }
 
-	// Store full tab list for tabs_update
-	if msg.Type == "tabs_update" {
-		if tabs, ok := msg.Data["tabs"].(map[string]interface{}); ok {
-			client.SetCurrentTabs(tabs)
-		}
-	}
-
-	// Relay to teacher
-	teacher := hub.GetTeacher()
-	if teacher != nil {
-		relayMsg := map[string]interface{}{
-			"type": "student_" + msg.Type,
-			"data": map[string]interface{}{
-				"clientId": client.ClientID,
-				"payload":  msg.Data,
-			},
-		}
-
-		if data, err := json.Marshal(relayMsg); err == nil {
-			hub.Broadcast(&models.BroadcastMessage{
-				Target:  "teacher",
-				Message: data,
-			})
-		}
-	}
-}
-
-func HandleScreenshot(client *models.Client, msg models.Message, hub *server.Hub, cfg *config.Config, logger *utils.Logger) {
-	if client.ClientType != "student" {
-		logger.Warn("Non-student sent screenshot")
-		return
-	}
-
-	// 1. OPTIMIZATION: Extract data immediately to free up the reader
-	imageData, ok := msg.Data["imageData"].(string)
-	if !ok {
-		logger.Warn("Screenshot missing imageData")
-		return
-	}
-	tabID := msg.Data["tabId"]
-	clientID := client.ClientID
-
-	// 2. OPTIMIZATION: Run compression asynchronously!
-	// This prevents the read pump from blocking, so we don't get network backpressure.
-	go func() {
-		startTime := time.Now()
-
-		// Compress screenshot
-		compressedData, err := utils.CompressScreenshot(imageData, cfg.ScreenshotQuality)
-		if err != nil {
-			logger.Warn(fmt.Sprintf("Screenshot compression failed: %v", err))
-			compressedData = imageData // Use original if compression fails
-		}
-
-		// Log compression stats (Optional: comment out in production to save I/O)
-		// originalSize := len(imageData)
-		// compressedSize := len(compressedData)
-		// processingTime := time.Since(startTime).Milliseconds()
-		// logger.Info(fmt.Sprintf("Screenshot processed for %s in %dms", clientID, processingTime))
-
-		// Check if too much time passed (stale frame)
-		if time.Since(startTime) > 2000*time.Millisecond {
-			logger.Warn("Dropping stale screenshot (>2s old)")
-			return
-		}
-
-		// Relay to teacher with compressed data
-		teacher := hub.GetTeacher()
-		if teacher != nil {
-			relayMsg := map[string]interface{}{
-				"type": "student_screenshot",
-				"data": map[string]interface{}{
-					"clientId": clientID,
-					"payload": map[string]interface{}{
-						"tabId":     tabID,
-						"imageData": compressedData,
-					},
-				},
-			}
-
-			if data, err := json.Marshal(relayMsg); err == nil {
-				hub.Broadcast(&models.BroadcastMessage{
-					Target:  "teacher",
-					Message: data,
-				})
-			}
-		}
-	}()
-}
-
-func HandleScreenshotError(client *models.Client, msg models.Message, hub *server.Hub, logger *utils.Logger) {
-	if client.ClientType != "student" {
-		logger.Warn("Non-student sent screenshot error")
-		return
-	}
-
-	// Relay to teacher
-	teacher := hub.GetTeacher()
-	if teacher != nil {
-		relayMsg := map[string]interface{}{
-			"type": "student_" + msg.Type,
-			"data": map[string]interface{}{
-				"clientId": client.ClientID,
-				"payload":  msg.Data,
-			},
-		}
-
-		if data, err := json.Marshal(relayMsg); err == nil {
-			hub.Broadcast(&models.BroadcastMessage{
-				Target:  "teacher",
-				Message: data,
-			})
-		}
-	}
-}
-
-func HandlePing(client *models.Client, msg models.Message, hub *server.Hub, logger *utils.Logger) {
-	pongMsg := map[string]interface{}{
-		"type": "pong",
+	// 1. Relay payload preparation
+	relayMsg := map[string]interface{}{
+		"type": "student_" + msg.Type,
 		"data": map[string]interface{}{
-			"timestamp": time.Now().UnixMilli(),
+			"clientId": client.ClientID,
+			"payload":  msg.Data,
 		},
 	}
+	
+	// 2. Control Message -> Use Standard Broadcast Channel
+	// Because tab updates are low frequency and reliable delivery matters more than speed.
+	if data, err := json.Marshal(relayMsg); err == nil {
+		hub.Broadcast(&models.BroadcastMessage{
+			Target:  "teacher",
+			Message: data,
+		})
+	}
+}
 
-	if data, err := json.Marshal(pongMsg); err == nil {
+// HandleScreenshot implements the FAST-PATH Relay
+func HandleScreenshot(client *models.Client, msg models.Message, hub *server.Hub, cfg *config.Config, logger *utils.Logger) {
+	// 1. Validation
+	if client.ClientType != "student" { return }
+
+	// 2. Data Extraction
+	// NOTE: We do NOT process/compress the image here. We act as a blind relay.
+	// The Client (Chrome Ext) MUST compress before sending.
+	
+	// Construct the relay message
+	relayMsg := map[string]interface{}{
+		"type": "student_screenshot",
+		"data": map[string]interface{}{
+			"clientId": client.ClientID,
+			"payload":  msg.Data, // Contains {tabId, imageData}
+		},
+	}
+	
+	finalBytes, err := json.Marshal(relayMsg)
+	if err != nil { return }
+
+	// 3. FAST-PATH: Direct Stream Injection
+	// Instead of dumping this into the Hub.Broadcast channel (which waits in line),
+	// we grab the teacher connection immediately and push.
+	
+	teacher := hub.GetTeacherSafe()
+	if teacher != nil {
 		select {
-		case client.Send <- data:
+		case teacher.Send <- finalBytes:
+			// Success
 		default:
-			// Optimization: Don't log on every dropped ping, it spams logs
+			// Teacher is lagging or disconnected.
+			// ACTION: DROP THE FRAME.
+			// Why? Because sending a screenshot from 2 seconds ago is useless.
+			// We want them to see the *next* frame immediately when they catch up.
+			// logger.Warn("Dropped frame for " + client.ClientID)
 		}
 	}
 }

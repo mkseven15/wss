@@ -24,9 +24,9 @@ func NewHub(cfg *config.Config, logger *utils.Logger) *Hub {
 	return &Hub{
 		students:   make(map[string]*models.Client),
 		teacher:    nil,
-		register:   make(chan *models.Client, cfg.MessageBufferSize),
-		unregister: make(chan *models.Client, cfg.MessageBufferSize),
-		broadcast:  make(chan *models.BroadcastMessage, cfg.MessageBufferSize),
+		register:   make(chan *models.Client),
+		unregister: make(chan *models.Client),
+		broadcast:  make(chan *models.BroadcastMessage, 256), // Larger buffer for control messages
 		config:     cfg,
 		logger:     logger,
 	}
@@ -47,67 +47,55 @@ func (h *Hub) Run() {
 	}
 }
 
+// GetTeacherSafe returns the teacher client pointer safely.
+// This allows handlers to bypass the main Hub loop for streaming.
+func (h *Hub) GetTeacherSafe() *models.Client {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.teacher
+}
+
+// GetStudentSafe returns a student client pointer safely.
+func (h *Hub) GetStudentSafe(clientID string) *models.Client {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.students[clientID]
+}
+
 func (h *Hub) handleRegister(client *models.Client) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	if client.ClientType == "teacher" {
 		if h.teacher != nil {
-			h.logger.Warn("New teacher connecting, closing old teacher connection")
+			h.logger.Warn("New teacher connecting, closing old session")
 			close(h.teacher.Send)
 		}
 		h.teacher = client
 		h.logger.Info("Teacher connected")
-
-		// Send initial student list to teacher
-		h.sendInitialStudentList()
+		
+		// Push initial state immediately
+		go h.sendInitialStudentList(client)
 
 	} else if client.ClientType == "student" {
 		if len(h.students) >= h.config.MaxStudents {
-			h.logger.Warn(fmt.Sprintf("Max students (%d) reached, rejecting %s", h.config.MaxStudents, client.ClientID))
-			msg := map[string]interface{}{
-				"type":    "error",
-				"message": "Maximum student capacity reached",
-			}
-			if data, err := json.Marshal(msg); err == nil {
-				client.Send <- data
-			}
+			h.sendError(client, "Class is full")
 			close(client.Send)
 			return
 		}
 
 		h.students[client.ClientID] = client
-		h.logger.Info(fmt.Sprintf("Student connected: %s (ID: %s) - Total: %d", client.Email, client.ClientID, len(h.students)))
+		h.logger.Info(fmt.Sprintf("Student + : %s (%s)", client.Email, client.ClientID))
 
-		// Notify teacher
+		// Notify Teacher (Control Message)
 		if h.teacher != nil {
-			msg := map[string]interface{}{
+			h.sendToTeacherInternal(map[string]interface{}{
 				"type": "student_connected",
 				"data": map[string]interface{}{
 					"clientId": client.ClientID,
 					"email":    client.Email,
 				},
-			}
-			if data, err := json.Marshal(msg); err == nil {
-				select {
-				case h.teacher.Send <- data:
-				default:
-					h.logger.Warn("Teacher send channel full, dropping message")
-				}
-			}
-		}
-
-		// Send acknowledgment to student
-		ack := map[string]interface{}{
-			"type":    "server_ack",
-			"message": "Connected successfully",
-		}
-		if data, err := json.Marshal(ack); err == nil {
-			select {
-			case client.Send <- data:
-			default:
-				h.logger.Warn("Student send channel full, dropping ack")
-			}
+			})
 		}
 	}
 }
@@ -126,110 +114,86 @@ func (h *Hub) handleUnregister(client *models.Client) {
 		if _, ok := h.students[client.ClientID]; ok {
 			delete(h.students, client.ClientID)
 			close(client.Send)
-			h.logger.Info(fmt.Sprintf("Student disconnected: %s (ID: %s) - Remaining: %d", client.Email, client.ClientID, len(h.students)))
+			h.logger.Info(fmt.Sprintf("Student - : %s", client.ClientID))
 
-			// Notify teacher
 			if h.teacher != nil {
-				msg := map[string]interface{}{
+				h.sendToTeacherInternal(map[string]interface{}{
 					"type": "student_disconnected",
 					"data": map[string]interface{}{
 						"clientId": client.ClientID,
 					},
-				}
-				if data, err := json.Marshal(msg); err == nil {
-					select {
-					case h.teacher.Send <- data:
-					default:
-						h.logger.Warn("Teacher send channel full, dropping disconnect notification")
-					}
-				}
+				})
 			}
 		}
 	}
 }
 
+// handleBroadcast processes low-priority control messages (chat, commands)
 func (h *Hub) handleBroadcast(message *models.BroadcastMessage) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	switch message.Target {
-	case "teacher":
-		if h.teacher != nil {
-			select {
-			case h.teacher.Send <- message.Message:
-			default:
-				h.logger.Warn("Teacher send channel full, dropping broadcast")
-			}
+	if message.Target == "teacher" && h.teacher != nil {
+		h.trySend(h.teacher, message.Message)
+	} else if message.Target == "student" {
+		for _, s := range h.students {
+			h.trySend(s, message.Message)
 		}
+	} else if client, ok := h.students[message.Target]; ok {
+		h.trySend(client, message.Message)
+	}
+}
 
-	case "student":
-		// Broadcast to all students (rarely used)
-		for _, student := range h.students {
-			select {
-			case student.Send <- message.Message:
-			default:
-				h.logger.Warn(fmt.Sprintf("Student %s send channel full, dropping broadcast", student.ClientID))
-			}
-		}
-
+// trySend attempts to send a message. If buffer is full, it drops it (Backpressure).
+func (h *Hub) trySend(client *models.Client, msg []byte) {
+	select {
+	case client.Send <- msg:
 	default:
-		// Specific client ID
-		if student, ok := h.students[message.Target]; ok {
-			select {
-			case student.Send <- message.Message:
-			default:
-				h.logger.Warn(fmt.Sprintf("Student %s send channel full, dropping message", message.Target))
-			}
+		// Buffer full - Drop message to prevent server blocking
+		// This is acceptable for real-time systems
+	}
+}
+
+// Internal helper to send map as json
+func (h *Hub) sendToTeacherInternal(msg interface{}) {
+	if data, err := json.Marshal(msg); err == nil {
+		if h.teacher != nil {
+			h.trySend(h.teacher, data)
 		}
 	}
 }
 
-func (h *Hub) sendInitialStudentList() {
-	studentList := make([]map[string]interface{}, 0, len(h.students))
-	for _, student := range h.students {
-		studentList = append(studentList, map[string]interface{}{
-			"clientId": student.ClientID,
-			"email":    student.Email,
+func (h *Hub) sendError(client *models.Client, errorMsg string) {
+	msg := map[string]interface{}{"type": "error", "message": errorMsg}
+	if data, err := json.Marshal(msg); err == nil {
+		client.Send <- data
+	}
+}
+
+func (h *Hub) sendInitialStudentList(teacher *models.Client) {
+	// Need lock to read map, but we're already inside a lock in handleRegister?
+	// No, this is called as a goroutine, so we need RLock
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	list := make([]map[string]interface{}, 0, len(h.students))
+	for _, s := range h.students {
+		list = append(list, map[string]interface{}{
+			"clientId": s.ClientID,
+			"email":    s.Email,
 		})
 	}
 
 	msg := map[string]interface{}{
 		"type": "initial_student_list",
-		"data": studentList,
+		"data": list,
 	}
-
 	if data, err := json.Marshal(msg); err == nil {
-		select {
-		case h.teacher.Send <- data:
-		default:
-			h.logger.Warn("Teacher send channel full, dropping initial student list")
-		}
+		h.trySend(teacher, data)
 	}
 }
 
-func (h *Hub) GetStudent(clientID string) *models.Client {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.students[clientID]
-}
-
-func (h *Hub) GetTeacher() *models.Client {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.teacher
-}
-
-// Register adds a client to the hub
-func (h *Hub) Register(client *models.Client) {
-	h.register <- client
-}
-
-// Unregister removes a client from the hub
-func (h *Hub) Unregister(client *models.Client) {
-	h.unregister <- client
-}
-
-// Broadcast sends a message to clients
-func (h *Hub) Broadcast(message *models.BroadcastMessage) {
-	h.broadcast <- message
-}
+// API Methods
+func (h *Hub) Register(c *models.Client)   { h.register <- c }
+func (h *Hub) Unregister(c *models.Client) { h.unregister <- c }
+func (h *Hub) Broadcast(m *models.BroadcastMessage) { h.broadcast <- m }
