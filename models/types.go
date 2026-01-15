@@ -19,6 +19,9 @@ type Client struct {
 	Email      string
 	LastSeen   time.Time
 	
+	// Added back to fix "unknown field" error
+	CurrentTabs map[string]interface{}
+
 	// We use a RWMutex specifically for client state to allow 
 	// high-speed concurrent reads of client status
 	mu         sync.RWMutex
@@ -58,6 +61,13 @@ func (c *Client) UpdateLastSeen() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.LastSeen = time.Now()
+}
+
+// Helper to safely set tabs (Thread-safe)
+func (c *Client) SetCurrentTabs(tabs map[string]interface{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.CurrentTabs = tabs
 }
 
 func (c *Client) MarshalJSON() ([]byte, error) {
